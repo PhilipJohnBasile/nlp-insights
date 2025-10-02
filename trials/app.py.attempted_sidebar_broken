@@ -1,0 +1,723 @@
+"""Streamlit app for exploring clinical trials data."""
+
+import re
+import subprocess
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+from trials.config import config
+
+# Page config
+st.set_page_config(
+    page_title="Clinical Trials Insights",
+    page_icon="🔬",
+    layout="wide",
+)
+
+
+@st.cache_data(ttl=60)  # Cache for 60 seconds to allow refresh after data fetch
+def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load all processed data files.
+
+    Returns:
+        Tuple of (trials, eligibility, features, risks) DataFrames
+    """
+    trials = pd.read_parquet(config.CLEAN_DATA_DIR / "trials.parquet")
+    eligibility = pd.read_parquet(config.CLEAN_DATA_DIR / "eligibility.parquet")
+    features = pd.read_parquet(config.CLEAN_DATA_DIR / "features.parquet")
+    risks = pd.read_parquet(config.CLEAN_DATA_DIR / "risks.parquet")
+
+    # Merge cluster data if available
+    cluster_file = config.CLEAN_DATA_DIR / "clusters.parquet"
+    if cluster_file.exists():
+        clusters = pd.read_parquet(cluster_file)
+        trials = trials.merge(clusters, on="trial_id", how="left")
+
+    return trials, eligibility, features, risks
+
+
+def highlight_terms(text: str, terms: list[str]) -> str:
+    """Highlight search terms in text with HTML.
+
+    Args:
+        text: Text to highlight
+        terms: List of terms to highlight
+
+    Returns:
+        HTML string with highlighted terms
+    """
+    if not text or not terms:
+        return text
+
+    highlighted = text
+    for term in terms:
+        if term:
+            # Case-insensitive search and replace
+            pattern = re.compile(re.escape(term), re.IGNORECASE)
+            highlighted = pattern.sub(
+                f'<mark style="background-color: yellow;">{term}</mark>',
+                highlighted,
+            )
+
+    return highlighted
+
+
+def get_dataset_info() -> dict:
+    """Get information about the current dataset."""
+    try:
+        trials_file = config.CLEAN_DATA_DIR / "trials.parquet"
+        if trials_file.exists():
+            df = pd.read_parquet(trials_file)
+            return {
+                "exists": True,
+                "count": len(df),
+                "phase_top": df["phase"].value_counts().index[0] if len(df) > 0 else "N/A",
+                "status_top": df["status"].value_counts().index[0] if len(df) > 0 else "N/A",
+            }
+        else:
+            return {"exists": False}
+    except Exception:
+        return {"exists": False}
+
+
+def main() -> None:
+    """Main Streamlit app."""
+    st.title("🔬 Clinical Trials Insights")
+    st.markdown(
+        """
+        **Research tool for analyzing clinical trial design and eligibility criteria.**
+
+        ⚠️ **Disclaimer**: This is a research tool only and not medical advice.
+        """
+    )
+
+    # Show dataset info in sidebar
+    with st.sidebar:
+        st.header("📊 Current Dataset")
+        dataset_info = get_dataset_info()
+
+        if dataset_info["exists"]:
+            st.metric("Total Trials", dataset_info["count"])
+            st.metric("Top Phase", dataset_info["phase_top"])
+            st.metric("Top Status", dataset_info["status_top"])
+
+            # Data management buttons
+            st.markdown("---")
+            st.subheader("🔧 Data Management")
+
+            if st.button("🔄 Refresh Data", help="Reload data from disk"):
+                st.cache_data.clear()
+                st.rerun()
+
+            if st.button("🗑️ Clear All Data", help="Delete all data files", type="secondary"):
+                st.session_state.confirm_delete = True
+
+            # Confirmation for delete
+            if st.session_state.get("confirm_delete", False):
+                st.warning("⚠️ Are you sure? This will delete all processed data files.")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ Yes, Delete", type="primary"):
+                        try:
+                            import shutil
+                            # Delete all clean data files
+                            for file in config.CLEAN_DATA_DIR.glob("*.parquet"):
+                                file.unlink()
+                            # Delete raw data files
+                            for file in config.RAW_DATA_DIR.glob("*.jsonl"):
+                                file.unlink()
+                            st.cache_data.clear()
+                            st.session_state.confirm_delete = False
+                            st.success("✓ All data deleted!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error deleting data: {e}")
+                with col2:
+                    if st.button("❌ Cancel"):
+                        st.session_state.confirm_delete = False
+                        st.rerun()
+        else:
+            st.info("No data loaded")
+            st.markdown("Go to the **Fetch Data** tab to download trials")
+
+    # Load data
+    try:
+        trials, eligibility, features, risks = load_data()
+
+        # Merge all data
+        df = trials.merge(eligibility, on="trial_id", how="left")
+        df = df.merge(features, on="trial_id", how="left")
+        df = df.merge(risks, on="trial_id", how="left")
+
+    except FileNotFoundError as e:
+        st.warning(
+            """
+            **No data loaded yet!**
+
+            Go to the **📥 Fetch Data** tab to download and process clinical trial data.
+
+            Or use the command line:
+            ```bash
+            ./run_pipeline.sh "breast cancer" 500 8
+            ```
+            """
+        )
+        # Still show the Fetch Data tab even if no data
+        df = None
+
+    # Tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Explore", "🔍 Eligibility Explorer", "⚠️ Risks", "📥 Fetch Data"])
+
+    # Check if data exists
+    if df is None:
+        with tab1:
+            st.info("No data loaded. Go to the **Fetch Data** tab to download trials.")
+        with tab2:
+            st.info("No data loaded. Go to the **Fetch Data** tab to download trials.")
+        with tab3:
+            st.info("No data loaded. Go to the **Fetch Data** tab to download trials.")
+        # Tab 4 will still show
+    else:
+        # ===== TAB 1: EXPLORE =====
+        with tab1:
+            st.header("Explore Clinical Trials")
+
+            # Filters
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                phases = ["All"] + sorted(
+                    [p for p in df["phase"].dropna().unique() if p]
+                )
+                selected_phase = st.selectbox("Phase", phases)
+
+            with col2:
+                statuses = ["All"] + sorted(
+                    [s for s in df["status"].dropna().unique() if s]
+                )
+                selected_status = st.selectbox("Status", statuses)
+
+            with col3:
+                min_enrollment = st.number_input(
+                    "Min Enrollment",
+                    min_value=0,
+                    value=0,
+                    step=10,
+                )
+
+            # Search box
+            search_query = st.text_input("Search in title", "")
+
+            # Apply filters
+            filtered_df = df.copy()
+
+            if selected_phase != "All":
+                filtered_df = filtered_df[filtered_df["phase"] == selected_phase]
+
+            if selected_status != "All":
+                filtered_df = filtered_df[filtered_df["status"] == selected_status]
+
+            if min_enrollment > 0:
+                filtered_df = filtered_df[
+                    filtered_df["enrollment"].fillna(0) >= min_enrollment
+                ]
+
+            if search_query:
+                filtered_df = filtered_df[
+                    filtered_df["title"].str.contains(
+                        search_query, case=False, na=False
+                    )
+                ]
+
+            # Display results
+            st.write(f"**{len(filtered_df)} trials found**")
+
+            # Select columns to display
+            display_cols = [
+                "trial_id",
+                "title",
+                "phase",
+                "status",
+                "enrollment",
+                "arms",
+                "study_type",
+                "allocation",
+                "total_risk_score",
+            ]
+
+            if "cluster" in filtered_df.columns:
+                display_cols.append("cluster")
+
+            display_df = filtered_df[
+                [c for c in display_cols if c in filtered_df.columns]
+            ].copy()
+
+            # Format numeric columns
+            if "total_risk_score" in display_df.columns:
+                display_df["total_risk_score"] = display_df["total_risk_score"].round(1)
+
+            st.dataframe(
+                display_df,
+                width=1200,
+                height=400,
+            )
+
+        # Export button
+        col1, col2 = st.columns([1, 5])
+        with col1:
+            csv = filtered_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Export CSV",
+                data=csv,
+                file_name="clinical_trials_export.csv",
+                mime="text/csv",
+            )
+
+        # Summary statistics
+        st.subheader("Summary Statistics")
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric("Total Trials", len(filtered_df))
+
+        with col2:
+            avg_enrollment = filtered_df["enrollment"].mean()
+            st.metric(
+                "Avg Enrollment",
+                f"{avg_enrollment:.0f}" if pd.notna(avg_enrollment) else "N/A",
+            )
+
+        with col3:
+            randomized_pct = filtered_df["randomized_flag"].mean() * 100
+            st.metric(
+                "Randomized",
+                f"{randomized_pct:.0f}%" if pd.notna(randomized_pct) else "N/A",
+            )
+
+        with col4:
+            avg_risk = filtered_df["total_risk_score"].mean()
+            st.metric(
+                "Avg Risk Score",
+                f"{avg_risk:.1f}" if pd.notna(avg_risk) else "N/A",
+            )
+
+    # ===== TAB 2: ELIGIBILITY EXPLORER =====
+    with tab2:
+        st.header("Eligibility Criteria Explorer")
+
+        # Search terms
+        search_terms_input = st.text_input(
+            "Search terms (comma-separated)",
+            placeholder="e.g., metastatic, stage IV, ECOG",
+        )
+
+        search_terms = [
+            term.strip() for term in search_terms_input.split(",") if term.strip()
+        ]
+
+        # Filter by terms
+        if search_terms:
+            matches = df[
+                df["eligibility_text"].str.contains(
+                    "|".join(search_terms), case=False, na=False
+                )
+            ]
+
+            st.write(f"**{len(matches)} trials match your search**")
+
+            # Display matching trials
+            for idx, row in matches.head(20).iterrows():
+                with st.expander(f"{row['trial_id']}: {row['title'][:100]}..."):
+                    st.markdown(f"**Phase:** {row['phase']}")
+                    st.markdown(f"**Status:** {row['status']}")
+                    st.markdown(f"**Enrollment:** {row['enrollment']}")
+
+                    st.markdown("**Eligibility Criteria:**")
+                    if pd.notna(row["eligibility_text"]):
+                        highlighted = highlight_terms(
+                            row["eligibility_text"], search_terms
+                        )
+                        st.markdown(
+                            f'<div style="max-height: 300px; overflow-y: auto; '
+                            f'padding: 10px; background-color: #f0f0f0; '
+                            f'color: #000000; '
+                            f'border-radius: 5px;">{highlighted}</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.write("No eligibility criteria available")
+
+        else:
+            st.info("Enter search terms to find trials with specific eligibility criteria")
+
+        # Display common disease stages
+        st.subheader("Common Disease Stage Terms")
+
+        all_stages = []
+        for stages in df["disease_stage_terms"].dropna():
+            if isinstance(stages, list):
+                all_stages.extend(stages)
+
+        if all_stages:
+            stage_counts = pd.Series(all_stages).value_counts().head(15)
+            st.bar_chart(stage_counts)
+
+    # ===== TAB 3: RISKS =====
+    with tab3:
+        st.header("Trial Design Risks")
+
+        st.markdown(
+            """
+            **Risk Scoring Methodology:**
+
+            - **Small Enrollment Penalty** (0-50 pts): Trials with fewer participants
+            - **No Randomization Penalty** (30 pts): Non-randomized trials
+            - **Single Site Penalty** (0-20 pts): Few sites/countries
+            - **Long Duration Penalty** (0-30 pts): Very long trial duration
+
+            **Total Risk Score:** Sum of all penalties (max 130 points)
+            """
+        )
+
+        # Risk threshold
+        risk_threshold = st.slider(
+            "Minimum Risk Score",
+            min_value=0,
+            max_value=130,
+            value=50,
+            step=10,
+        )
+
+        # Filter high-risk trials
+        high_risk = df[df["total_risk_score"] >= risk_threshold].sort_values(
+            "total_risk_score", ascending=False
+        )
+
+        st.write(f"**{len(high_risk)} trials with risk score ≥ {risk_threshold}**")
+
+        # Display high-risk trials
+        risk_display_cols = [
+            "trial_id",
+            "title",
+            "phase",
+            "enrollment",
+            "randomized_flag",
+            "num_sites",
+            "duration_days",
+            "small_enrollment_penalty",
+            "no_randomization_penalty",
+            "single_site_penalty",
+            "long_duration_penalty",
+            "total_risk_score",
+        ]
+
+        risk_df = high_risk[
+            [c for c in risk_display_cols if c in high_risk.columns]
+        ].copy()
+
+        # Round numeric columns
+        for col in risk_df.select_dtypes(include=["float64"]).columns:
+            risk_df[col] = risk_df[col].round(1)
+
+        st.dataframe(
+            risk_df,
+            width=1200,
+            height=400,
+        )
+
+        # Export high-risk trials
+        col1, col2 = st.columns([1, 5])
+        with col1:
+            csv_risk = high_risk.to_csv(index=False)
+            st.download_button(
+                label="📥 Export High-Risk Trials",
+                data=csv_risk,
+                file_name="high_risk_trials.csv",
+                mime="text/csv",
+            )
+
+        # Risk distribution
+        st.subheader("Risk Score Distribution")
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.hist(df["total_risk_score"].dropna(), bins=20, edgecolor='black')
+        ax.set_xlabel("Risk Score")
+        ax.set_ylabel("Frequency")
+            st.pyplot(fig)
+
+    # ===== TAB 4: FETCH DATA ===== (Always visible)
+    with tab4:
+        st.header("📥 Fetch New Trial Data")
+
+        st.markdown("""
+        Fetch fresh clinical trial data from ClinicalTrials.gov and process it through the pipeline.
+
+        **This will:**
+        1. Fetch trials from ClinicalTrials.gov API
+        2. Normalize and parse eligibility criteria
+        3. Build features and calculate risk scores
+        4. Cluster trials
+        5. Update the data available in other tabs
+        """)
+
+        # Common oncology diseases for autocomplete
+        oncology_conditions = [
+            "breast cancer",
+            "lung cancer",
+            "prostate cancer",
+            "colorectal cancer",
+            "melanoma",
+            "lymphoma",
+            "leukemia",
+            "pancreatic cancer",
+            "ovarian cancer",
+            "bladder cancer",
+            "kidney cancer",
+            "liver cancer",
+            "esophageal cancer",
+            "gastric cancer",
+            "brain cancer",
+            "glioblastoma",
+            "multiple myeloma",
+            "thyroid cancer",
+            "cervical cancer",
+            "endometrial cancer",
+            "head and neck cancer",
+            "sarcoma",
+            "mesothelioma",
+            "neuroblastoma",
+            "non-small cell lung cancer",
+            "small cell lung cancer",
+            "triple negative breast cancer",
+            "HER2 positive breast cancer",
+            "metastatic breast cancer",
+            "chronic lymphocytic leukemia",
+            "acute myeloid leukemia",
+            "hodgkin lymphoma",
+            "non-hodgkin lymphoma",
+            "diffuse large B-cell lymphoma",
+        ]
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            condition = st.selectbox(
+                "Disease/Condition",
+                options=[""] + sorted(oncology_conditions) + ["Other (type below)"],
+                index=1,  # Default to first option (breast cancer)
+                help="Select a common oncology disease or choose 'Other' to type your own"
+            )
+
+            # If "Other" is selected, show text input
+            if condition == "Other (type below)":
+                condition = st.text_input(
+                    "Enter custom disease/condition",
+                    value="",
+                    placeholder="e.g., diabetes, heart failure, asthma",
+                    help="Enter any disease or condition"
+                )
+            elif condition == "":
+                st.warning("Please select a disease/condition")
+
+        with col2:
+            max_trials = st.number_input(
+                "Maximum Trials",
+                min_value=10,
+                max_value=2000,
+                value=500,
+                step=50,
+                help="Maximum number of trials to fetch (API limit: 2000)"
+            )
+
+        num_clusters = st.slider(
+            "Number of Clusters",
+            min_value=3,
+            max_value=15,
+            value=8,
+            help="Number of clusters for K-means clustering"
+        )
+
+        if st.button("🚀 Fetch and Process Data", type="primary"):
+            if not condition.strip():
+                st.error("Please enter a disease or condition")
+            else:
+                st.info(f"Starting data fetch for: **{condition}** (max {max_trials} trials)")
+
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                try:
+                    # Step 1: Fetch
+                    status_text.text("Step 1/6: Fetching trials from ClinicalTrials.gov...")
+                    progress_bar.progress(10)
+
+                    fetch_result = subprocess.run(
+                        ["python3", "-m", "trials.fetch", "--condition", condition, "--max", str(max_trials)],
+                        capture_output=True,
+                        text=True,
+                        timeout=600
+                    )
+
+                    if fetch_result.returncode != 0:
+                        st.error(f"Fetch failed: {fetch_result.stderr}")
+                        st.stop()
+
+                    progress_bar.progress(20)
+
+                    # Step 2: Normalize
+                    status_text.text("Step 2/6: Normalizing trial data...")
+                    subprocess.run(
+                        ["python3", "-m", "trials.normalize"],
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        check=True
+                    )
+                    progress_bar.progress(40)
+
+                    # Step 3: Parse eligibility
+                    status_text.text("Step 3/6: Parsing eligibility criteria...")
+                    subprocess.run(
+                        ["python3", "-m", "trials.eligibility"],
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        check=True
+                    )
+                    progress_bar.progress(55)
+
+                    # Step 4: Build features
+                    status_text.text("Step 4/6: Building features...")
+                    subprocess.run(
+                        ["python3", "-m", "trials.features"],
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        check=True
+                    )
+                    progress_bar.progress(70)
+
+                    # Step 5: Cluster
+                    status_text.text("Step 5/6: Clustering trials...")
+                    subprocess.run(
+                        ["python3", "-m", "trials.cluster", "--k", str(num_clusters)],
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        check=True
+                    )
+                    progress_bar.progress(85)
+
+                    # Step 6: Risk scoring
+                    status_text.text("Step 6/6: Calculating risk scores...")
+                    subprocess.run(
+                        ["python3", "-m", "trials.risk"],
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        check=True
+                    )
+                    progress_bar.progress(100)
+
+                    status_text.text("✓ Pipeline complete!")
+
+                    # Clear the cache to force reload
+                    st.cache_data.clear()
+
+                    st.success(f"""
+                    ✅ **Data successfully fetched and processed!**
+
+                    - Condition: **{condition}**
+                    - Clusters created: **{num_clusters}**
+
+                    **The data has been updated!** Navigate to other tabs to see the new data.
+                    """)
+
+                    st.balloons()
+
+                    # Show instructions
+                    st.info("""
+                    **Next steps:**
+                    1. Click on the **Explore** tab to view the new data
+                    2. Use filters and search to analyze your trials
+                    3. Check the **Risks** tab for high-risk trials
+
+                    ℹ️ The cache has been cleared - all tabs now show the latest data.
+                    💡 Check the sidebar for dataset stats and data management options.
+                    """)
+
+                    # Force page reload to update sidebar
+                    st.rerun()
+
+                except subprocess.TimeoutExpired:
+                    st.error("Process timed out. Try fetching fewer trials.")
+                except subprocess.CalledProcessError as e:
+                    st.error(f"Pipeline failed: {e.stderr}")
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+
+        # Show current dataset info
+        st.markdown("---")
+        st.subheader("📁 Current Dataset Details")
+
+        try:
+            trials_file = config.CLEAN_DATA_DIR / "trials.parquet"
+            if trials_file.exists():
+                current_df = pd.read_parquet(trials_file)
+
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Trials", len(current_df))
+                with col2:
+                    phase_counts = current_df["phase"].value_counts()
+                    top_phase = phase_counts.index[0] if len(phase_counts) > 0 else "N/A"
+                    st.metric("Most Common Phase", top_phase)
+                with col3:
+                    status_counts = current_df["status"].value_counts()
+                    top_status = status_counts.index[0] if len(status_counts) > 0 else "N/A"
+                    st.metric("Most Common Status", top_status)
+                with col4:
+                    st.metric("Data Files", "5 Parquet files")
+
+                # Show file sizes and last modified
+                st.markdown("**📂 Data Files:**")
+                data_files = [
+                    ("trials.parquet", "Trial metadata"),
+                    ("eligibility.parquet", "Eligibility criteria"),
+                    ("features.parquet", "Numeric features"),
+                    ("clusters.parquet", "Cluster assignments"),
+                    ("risks.parquet", "Risk scores")
+                ]
+
+                import datetime
+                file_data = []
+                for filename, description in data_files:
+                    filepath = config.CLEAN_DATA_DIR / filename
+                    if filepath.exists():
+                        size_kb = filepath.stat().st_size / 1024
+                        modified = datetime.datetime.fromtimestamp(filepath.stat().st_mtime)
+                        file_data.append({
+                            "File": filename,
+                            "Description": description,
+                            "Size": f"{size_kb:.1f} KB",
+                            "Last Modified": modified.strftime("%Y-%m-%d %H:%M")
+                        })
+
+                if file_data:
+                    st.dataframe(pd.DataFrame(file_data), hide_index=True, use_container_width=True)
+
+                # Show phase distribution
+                st.markdown("**📊 Phase Distribution:**")
+                phase_dist = current_df["phase"].value_counts().head(10)
+                st.bar_chart(phase_dist)
+
+            else:
+                st.warning("No data loaded. Use the form above to fetch trials.")
+        except Exception as e:
+            st.error(f"Error reading current data: {e}")
+
+
+if __name__ == "__main__":
+    main()

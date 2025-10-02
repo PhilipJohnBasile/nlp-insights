@@ -1,0 +1,13 @@
+# Add these features to app.py:
+
+1. Sidebar with dataset info
+2. Refresh data button  
+3. Clear data button with confirmation
+4. Better "no data" handling
+5. Auto-reload after fetch
+
+Key changes needed:
+- Add sidebar showing current dataset stats
+- Add data management buttons
+- Handle case when no data exists
+- Clear cache and rerun after fetching new data
