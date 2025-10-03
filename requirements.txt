@@ -12,8 +12,16 @@ python-dotenv>=1.0.0
 # Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0
+pytest-mock>=3.12.0
+pytest-asyncio>=0.21.0
 
-# Optional: Better performance and development
+# UI Testing (optional)
+pytest-playwright>=0.4.0
+
+# Development (optional)
+black>=23.0.0
+ruff>=0.1.0
+
+# Optional: Better performance and ML features
 # transformers>=4.35.0  # Uncomment if using embeddings
 # torch>=2.1.0  # Uncomment if using embeddings
-# ruff>=0.1.0  # Linting
