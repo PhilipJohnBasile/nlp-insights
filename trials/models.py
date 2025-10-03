@@ -112,6 +112,17 @@ class ClinicalTrial(BaseModel):
         enrollment = design.get("enrollmentInfo", {})
         return enrollment.get("count")
 
+    def get_enrollment_type(self) -> Optional[str]:
+        """Extract enrollment type (ACTUAL vs ESTIMATED)."""
+        design = self.protocol_section.get("designModule", {})
+        enrollment = design.get("enrollmentInfo", {})
+        return enrollment.get("type")
+
+    def get_last_update_date(self) -> Optional[str]:
+        """Extract last updated date."""
+        status = self.protocol_section.get("statusModule", {})
+        return status.get("lastUpdateSubmitDate") or status.get("statusVerifiedDate")
+
     def get_study_type(self) -> Optional[str]:
         """Extract study type."""
         design = self.protocol_section.get("designModule", {})
@@ -178,6 +189,8 @@ class NormalizedTrial(BaseModel):
     start_date: Optional[str] = None
     completion_date: Optional[str] = None
     enrollment: Optional[int] = None
+    enrollment_type: Optional[str] = None  # ACTUAL vs ESTIMATED
+    last_updated: Optional[str] = None
     arms: int = 0
     countries: list[str] = Field(default_factory=list)
     study_type: Optional[str] = None

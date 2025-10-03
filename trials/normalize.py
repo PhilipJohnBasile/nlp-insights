@@ -39,6 +39,8 @@ def normalize_trial(trial_data: dict) -> Optional[NormalizedTrial]:
             start_date=trial.get_start_date(),
             completion_date=trial.get_completion_date(),
             enrollment=trial.get_enrollment(),
+            enrollment_type=trial.get_enrollment_type(),
+            last_updated=trial.get_last_update_date(),
             arms=arm_count,
             countries=countries,
             study_type=trial.get_study_type(),
